@@ -298,6 +298,7 @@
     .chart-loading { stroke: var(--bad); stroke-width: 2.8; fill: none; }
     .chart-thermal { stroke: var(--a); stroke-width: 2.6; fill: none; }
     .chart-renewable { stroke: var(--c); stroke-width: 1.8; fill: none; opacity: .8; }
+    .chart-renewable-baseline { stroke: var(--c); stroke-width: 1.5; fill: none; opacity: .45; stroke-dasharray: 7 5; }
     .chart-label { fill: var(--muted); font-size: 12px; }
     .curve-legend {
       display: flex;
@@ -310,6 +311,7 @@
     .curve-key::before { content: ""; width: 18px; height: 3px; border-radius: 999px; background: var(--bad); display: inline-block; }
     .curve-key.thermal::before { background: var(--a); }
     .curve-key.renewable::before { background: var(--c); }
+    .curve-key.renewable-baseline::before { background: var(--c); opacity: .55; background-image: linear-gradient(90deg, currentColor 0 55%, transparent 55% 100%); }
     .branch-base { stroke: var(--line); stroke-width: 1; opacity: .45; fill: none; }
     .branch-reinforced { stroke: var(--b); stroke-width: 2.2; opacity: .78; fill: none; }
     .branch-new { stroke: var(--a); stroke-width: 3; opacity: .95; fill: none; }
@@ -497,7 +499,8 @@
         <div class="curve-legend">
           <span class="curve-key">max line loading</span>
           <span class="curve-key thermal">residual thermal</span>
-          <span class="curve-key renewable">new renewables</span>
+          <span class="curve-key renewable">renewable availability</span>
+          <span class="curve-key renewable-baseline">normal renewable baseline</span>
         </div>
         <div class="curve-stats" id="curveStats"></div>
         <div class="stress-explainer" id="stressExplainer"></div>
@@ -858,6 +861,7 @@ function pointsFor(rows, x, y, key) {
 }
 function renderStressCurve(candidate, stress) {
   const rows = hourlyByKey.get(`${candidate.name}::${stress.stress}`) || [];
+  const normalRows = hourlyByKey.get(`${candidate.name}::normal_day`) || rows;
   const root = document.getElementById("stressCurve");
   const stats = document.getElementById("curveStats");
   const explainer = document.getElementById("stressExplainer");
@@ -874,7 +878,12 @@ function renderStressCurve(candidate, stress) {
   const plotW = w - m.left - m.right;
   const plotH = h - m.top - m.bottom;
   const loadingMax = Math.max(120, ...rows.map(row => Number(row.maxLoading || 0))) * 1.06;
-  const thermalMax = Math.max(1, ...rows.map(row => Number(row.residualThermal || 0)), ...rows.map(row => Number(row.newRenewable || 0))) * 1.08;
+  const thermalMax = Math.max(
+    1,
+    ...rows.map(row => Number(row.residualThermal || 0)),
+    ...rows.map(row => Number(row.newRenewable || 0)),
+    ...normalRows.map(row => Number(row.newRenewable || 0))
+  ) * 1.08;
   const x = hour => m.left + ((Number(hour) - 1) / 23) * plotW;
   const yLoading = value => m.top + (1 - Number(value) / loadingMax) * plotH;
   const yMw = value => m.top + (1 - Number(value) / thermalMax) * plotH;
@@ -885,6 +894,12 @@ function renderStressCurve(candidate, stress) {
   const severeHours = rows.filter(row => Number(row.maxLoading) > 115).length;
   const minThermal = rows.reduce((best, row) => Number(row.residualThermal) < Number(best.residualThermal) ? row : best, rows[0]);
   const info = stressInfo(stress.stress);
+  const renewableMwh = rows.reduce((sum, row) => sum + Number(row.newRenewable || 0), 0);
+  const normalRenewableMwh = normalRows.reduce((sum, row) => sum + Number(row.newRenewable || 0), 0);
+  const renewableDeltaPct = normalRenewableMwh ? (renewableMwh - normalRenewableMwh) / normalRenewableMwh * 100 : 0;
+  const renewableDeltaText = Math.abs(renewableDeltaPct) < 0.05
+    ? "Renewable availability is unchanged from the normal-day profile."
+    : `Renewable availability is ${Math.abs(renewableDeltaPct).toFixed(1)}% ${renewableDeltaPct < 0 ? "below" : "above"} the normal-day profile.`;
   const behavior = severeHours > 0
     ? "In this selected topology, the stress breaches the 115% screening gate."
     : overloadHours > 0
@@ -893,6 +908,7 @@ function renderStressCurve(candidate, stress) {
   const loadingPts = pointsFor(rows, x, yLoading, "maxLoading");
   const thermalPts = pointsFor(rows, x, yMw, "residualThermal");
   const renewablePts = pointsFor(rows, x, yMw, "newRenewable");
+  const normalRenewablePts = pointsFor(normalRows, x, yMw, "newRenewable");
   const hourTicks = [1, 6, 12, 18, 24];
   const loadingTicks = [0, 50, 100, 115].filter(v => v <= loadingMax);
   const mwTicks = [0, Math.round(thermalMax / 2), Math.round(thermalMax)];
@@ -906,6 +922,7 @@ function renderStressCurve(candidate, stress) {
       ${mwTicks.map(value => `<text class="chart-label" x="${m.left + plotW + 8}" y="${yMw(value) + 4}">${fmt(value, " MW")}</text>`).join("")}
       <line class="chart-threshold" x1="${m.left}" y1="${threshold100}" x2="${m.left + plotW}" y2="${threshold100}"></line>
       <line class="chart-threshold" x1="${m.left}" y1="${threshold115}" x2="${m.left + plotW}" y2="${threshold115}" opacity=".65"></line>
+      <polyline class="chart-renewable-baseline" points="${normalRenewablePts}"></polyline>
       <polyline class="chart-renewable" points="${renewablePts}"></polyline>
       <polyline class="chart-thermal" points="${thermalPts}"></polyline>
       <polyline class="chart-loading" points="${loadingPts}"></polyline>
@@ -923,6 +940,7 @@ function renderStressCurve(candidate, stress) {
   `;
   explainer.innerHTML = `
     <p><strong>${info.title}.</strong> ${info.meaning}</p>
+    <p><strong>Renewable curve:</strong> It is mostly solar availability, so a smooth bell shape is expected. Topology candidates share the same renewable portfolio, so this curve changes with weather/availability stresses, not with line-reinforcement choices. ${renewableDeltaText}</p>
     <p><strong>What to watch:</strong> ${info.watch} ${behavior}</p>
   `;
 }
